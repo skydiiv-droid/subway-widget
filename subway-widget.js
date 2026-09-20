@@ -124,6 +124,17 @@ function parseReceiptTime(text) {
   return Number.isNaN(t) ? null : t;
 }
 
+// 위젯은 스크립트를 계속 돌리지 못한다. 대신 도착 시각을 넘겨주면 iOS가
+// 초 단위로 알아서 깎아 보여준다.
+function arrivalDate(secs) {
+  return new Date(Date.now() + secs * 1000);
+}
+
+function clockOf(secs) {
+  const d = arrivalDate(secs);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 function formatRemaining(secs) {
   if (secs === null || secs === undefined) return "—";
   if (secs <= 10) return "곧";
@@ -160,10 +171,27 @@ const ARVL_CODE = {
   "3": "전역 출발", "4": "전역 진입", "5": "전역 도착", "99": "운행 중",
 };
 
+// 서울시 쪽은 https 요청이 응답 없이 멎는 경우가 있어, 문서에 적힌 http를 먼저 쓴다.
+const SEOUL_BASES = [
+  "http://swopenapi.seoul.go.kr/api/subway",
+  "https://swopenapi.seoul.go.kr/api/subway",
+];
+
 async function fetchSeoul(leg) {
-  const url = "https://swopenapi.seoul.go.kr/api/subway/" +
-    `${SEOUL_API_KEY}/json/realtimeStationArrival/0/30/${encodeURIComponent(leg.station)}`;
-  const data = await getJSON(url);
+  const path = `${SEOUL_API_KEY}/json/realtimeStationArrival/0/10/` +
+    encodeURIComponent(leg.station);
+
+  let data = null;
+  let lastError = null;
+  for (const base of SEOUL_BASES) {
+    try {
+      data = await getJSON(`${base}/${path}`);
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (!data) throw lastError || new Error("응답 없음");
 
   const code = data?.errorMessage?.code;
   if (code && code !== "INFO-000") {
@@ -399,25 +427,35 @@ function drawLeg(container, result) {
     dash.font = Font.boldSystemFont(17);
     dash.textColor = DIM;
   } else {
-    const [first, ...rest] = result.arrivals;
-    const primary = row.addText(formatRemaining(first.secs));
-    primary.font = Font.boldSystemFont(17);
-    primary.textColor = FG;
-    rest.forEach((arrival) => {
-      row.addSpacer(7);
-      const next = row.addText(formatRemaining(arrival.secs));
-      next.font = Font.systemFont(12);
-      next.textColor = MUTED;
-    });
+    const first = result.arrivals[0];
+    // 한 시간 안쪽이면 살아 움직이는 카운트다운으로, 그 밖이면 그냥 숫자로 둔다.
+    if (first.secs !== null && first.secs > 0 && first.secs < 3600) {
+      const timer = row.addDate(arrivalDate(first.secs));
+      timer.applyTimerStyle();
+      timer.rightAlignText();
+      timer.font = Font.boldSystemFont(18);
+      timer.textColor = FG;
+    } else {
+      const primary = row.addText(formatRemaining(first.secs));
+      primary.font = Font.boldSystemFont(18);
+      primary.textColor = FG;
+    }
   }
 
   // 보조 설명은 역명 아래로 들여쓴다.
   const sub = container.addStack();
   sub.addSpacer(BADGE_W + BADGE_GAP);
-  const base = result.message || result.arrivals[0].note || "";
-  const note = sub.addText(
-    result.stale ? [base, result.stale].filter(Boolean).join(" · ") : base
-  );
+  const parts = [];
+  if (result.message) {
+    parts.push(result.message);
+  } else {
+    if (result.arrivals[0].note) parts.push(result.arrivals[0].note);
+    const next = result.arrivals[1];
+    if (next && next.secs !== null) parts.push(`다음 ${clockOf(next.secs)}`);
+  }
+  if (result.stale) parts.push(result.stale);
+
+  const note = sub.addText(parts.join(" · "));
   note.font = Font.systemFont(9);
   note.textColor = result.message || result.stale ? MUTED : DIM;
   note.lineLimit = 1;
@@ -481,7 +519,19 @@ function buildWidget(sections, currentMode, now) {
   });
   widget.addSpacer();
 
-  widget.refreshAfterDate = new Date(Date.now() + 60 * 1000);
+  // 다음 열차가 도착할 즈음 새로 그리도록 요청한다. iOS가 그대로 지켜주지는
+  // 않지만, 무의미하게 지난 카운트다운이 오래 남아 있는 건 줄어든다.
+  const soonest = sections
+    .flatMap((section) => section.results)
+    .map((result) => result.arrivals[0])
+    .filter((a) => a && a.secs !== null && a.secs > 0)
+    .reduce((min, a) => Math.min(min, a.secs), Infinity);
+
+  const waitSecs = Math.min(Math.max(Number.isFinite(soonest) ? soonest : 300, 60), 900);
+  widget.refreshAfterDate = new Date(Date.now() + waitSecs * 1000);
+
+  // 탭하면 스크립트가 바로 다시 돈다.
+  widget.url = `scriptable:///run?scriptName=${encodeURIComponent(Script.name())}`;
   return widget;
 }
 
