@@ -145,7 +145,7 @@ const diagDump = [];
 
 async function getJSON(url) {
   const req = new Request(url);
-  req.timeoutInterval = 15;
+  req.timeoutInterval = 9;
   req.headers = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
@@ -253,16 +253,94 @@ function fetchTimetable(leg, clock) {
     }));
 }
 
-async function loadLeg(leg, clock) {
-  try {
-    let arrivals;
-    if (leg.source === "seoul") arrivals = await fetchSeoul(leg);
-    else if (leg.source === "arex") arrivals = await fetchArex(leg);
-    else arrivals = fetchTimetable(leg, clock);
+// 위젯에 주어지는 실행 시간이 넉넉하지 않다. 전체 예산을 정해두고 구간마다
+// 남은 만큼만 기다린 뒤, 늦는 구간은 직전 결과로 대신 채운다.
+const BUDGET_MS = 12000;
+const startedAt = Date.now();
 
-    if (!arrivals.length) return { leg, arrivals: [], message: "운행 정보 없음" };
-    return { leg, arrivals: arrivals.slice(0, TRAINS_PER_LEG) };
+function remainingBudget() {
+  return Math.max(1500, BUDGET_MS - (Date.now() - startedAt));
+}
+
+function withDeadline(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      Timer.schedule(ms, false, () => reject(new Error("시간 초과")));
+    }),
+  ]);
+}
+
+// ── 캐시 ──────────────────────────────────────────────────────
+
+const CACHE_TTL = 600; // 초. 이보다 오래된 값은 쓰지 않는다.
+const fm = FileManager.local();
+const CACHE_PATH = fm.joinPath(fm.cacheDirectory(), "subway-widget.json");
+
+function loadCache() {
+  try {
+    return JSON.parse(fm.readString(CACHE_PATH)) || {};
   } catch (err) {
+    return {};
+  }
+}
+
+function saveCache(cache) {
+  try {
+    fm.writeString(CACHE_PATH, JSON.stringify(cache));
+  } catch (err) {
+    // 캐시를 못 써도 위젯 자체는 돌아가야 한다.
+  }
+}
+
+const cache = loadCache();
+
+function legKey(leg) {
+  return `${leg.source}:${leg.station}:${leg.via}`;
+}
+
+function cachedArrivals(leg) {
+  const entry = cache[legKey(leg)];
+  if (!entry) return null;
+
+  const age = (Date.now() - entry.at) / 1000;
+  if (age > CACHE_TTL) return null;
+
+  // 저장해 둔 값은 그때 기준이므로 흐른 시간만큼 당긴다.
+  const arrivals = entry.arrivals
+    .map((a) => ({ ...a, secs: a.secs === null ? null : a.secs - age }))
+    .filter((a) => a.secs === null || a.secs > -30);
+
+  return arrivals.length ? { arrivals, age } : null;
+}
+
+// ── 구간 로딩 ─────────────────────────────────────────────────
+
+async function loadLeg(leg, clock) {
+  if (leg.source === "timetable") {
+    try {
+      const arrivals = fetchTimetable(leg, clock);
+      if (!arrivals.length) return { leg, arrivals: [], message: "운행 종료" };
+      return { leg, arrivals: arrivals.slice(0, TRAINS_PER_LEG) };
+    } catch (err) {
+      return { leg, arrivals: [], message: err.message };
+    }
+  }
+
+  try {
+    const fetcher = leg.source === "seoul" ? fetchSeoul : fetchArex;
+    const arrivals = await withDeadline(fetcher(leg), remainingBudget());
+    if (!arrivals.length) return { leg, arrivals: [], message: "운행 정보 없음" };
+
+    const shown = arrivals.slice(0, TRAINS_PER_LEG);
+    cache[legKey(leg)] = { at: Date.now(), arrivals: shown };
+    return { leg, arrivals: shown };
+  } catch (err) {
+    const fallback = cachedArrivals(leg);
+    if (fallback) {
+      const mins = Math.max(1, Math.round(fallback.age / 60));
+      return { leg, arrivals: fallback.arrivals, stale: `${mins}분 전 정보` };
+    }
     return { leg, arrivals: [], message: `불러오기 실패 (${err.message})` };
   }
 }
@@ -336,11 +414,12 @@ function drawLeg(container, result) {
   // 보조 설명은 역명 아래로 들여쓴다.
   const sub = container.addStack();
   sub.addSpacer(BADGE_W + BADGE_GAP);
+  const base = result.message || result.arrivals[0].note || "";
   const note = sub.addText(
-    result.message || result.arrivals[0].note || ""
+    result.stale ? [base, result.stale].filter(Boolean).join(" · ") : base
   );
   note.font = Font.systemFont(9);
-  note.textColor = result.message ? MUTED : DIM;
+  note.textColor = result.message || result.stale ? MUTED : DIM;
   note.lineLimit = 1;
   sub.addSpacer();
 }
@@ -420,11 +499,15 @@ let modes = Object.keys(ROUTES);
 if (ROUTES[param]) modes = [param];
 else if (config.runsInWidget && config.widgetFamily === "medium") modes = [currentMode];
 
-const sections = [];
-for (const mode of modes) {
-  const results = await Promise.all(ROUTES[mode].map((leg) => loadLeg(leg, clock)));
-  sections.push({ mode, results });
-}
+// 방향별로 나눠 부르면 왕복이 두 배가 된다. 전 구간을 한 번에 띄운다.
+const jobs = modes.flatMap((mode) => ROUTES[mode].map((leg) => ({ mode, leg })));
+const loaded = await Promise.all(jobs.map((job) => loadLeg(job.leg, clock)));
+saveCache(cache);
+
+const sections = modes.map((mode) => ({
+  mode,
+  results: loaded.filter((_, i) => jobs[i].mode === mode),
+}));
 
 const widget = buildWidget(sections, currentMode, now);
 
