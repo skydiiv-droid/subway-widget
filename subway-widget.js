@@ -22,11 +22,17 @@ const AUTO_COMMUTE_UNTIL = 13; // 13시 이전 = 출근
 // 각 구간마다 몇 대까지 보여줄지
 const TRAINS_PER_LEG = 2;
 
-// 남은 시간 표시 방식
-//   relative  iOS가 살아 움직이게 그린다. "5분 후" / 지나면 "5분 전" (권장)
-//   timer     초 단위 카운트다운. 정확하지만 지나가면 위로 세기 시작한다
-//   static    스크립트가 그릴 때의 값으로 고정. 갱신 전까지 움직이지 않는다
-const COUNTDOWN_STYLE = "relative";
+// 보조 줄에 살아 움직이는 남은 시간을 덧붙일지 고른다.
+//
+// iOS가 스스로 갱신해 주는 표시는 timer / relative / offset 뿐인데, 셋 다 목표
+// 시각을 지나도 멈추지 않고 계속 값을 키운다. 위젯은 스냅샷 하나만 넘길 수 있어
+// "지나면 멈춰라" 를 걸어둘 방법이 없다. 그래서 기본은 끄고, 틀릴 일이 없는
+// 출발 시각을 크게 둔다.
+//
+//   off       덧붙이지 않는다 (기본)
+//   relative  "5분 후" / 지나면 "5분 전"
+//   timer     초 단위. 지나가면 스톱워치처럼 위로 센다
+const COUNTDOWN_STYLE = "off";
 
 // true 로 두고 Scriptable 앱에서 직접 실행하면 원본 응답을 클립보드에 복사한다.
 const DIAG = false;
@@ -428,51 +434,51 @@ function drawLeg(container, result) {
 
   row.addSpacer();
 
-  if (result.message) {
-    const dash = row.addText("—");
+  // 출발 시각은 위젯이 몇 시간을 멈춰 있어도 틀리지 않는다. 이걸 크게 둔다.
+  const timed = result.message ? [] : result.arrivals.filter((a) => a.secs !== null);
+
+  if (!timed.length) {
+    const dash = row.addText(result.message ? "—" : formatRemaining(null));
     dash.font = Font.boldSystemFont(17);
     dash.textColor = DIM;
   } else {
-    const first = result.arrivals[0];
-    const live = COUNTDOWN_STYLE !== "static" &&
-      first.secs !== null && first.secs > 0 && first.secs < 3600;
+    const primary = row.addText(clockOf(timed[0].secs));
+    primary.font = Font.boldSystemFont(17);
+    primary.textColor = FG;
 
-    if (live) {
-      const date = row.addDate(arrivalDate(first.secs));
-      // relative는 지나간 열차를 "N분 전"으로 적어 방향이 드러난다.
-      // timer는 초까지 보여주지만 지나가면 위로 세므로 읽는 사람이 구분할 수 없다.
-      if (COUNTDOWN_STYLE === "timer") date.applyTimerStyle();
-      else date.applyRelativeStyle();
-      date.rightAlignText();
-      date.font = Font.boldSystemFont(17);
-      date.textColor = FG;
-    } else {
-      const primary = row.addText(formatRemaining(first.secs));
-      primary.font = Font.boldSystemFont(17);
-      primary.textColor = FG;
+    if (timed[1]) {
+      row.addSpacer(7);
+      const next = row.addText(clockOf(timed[1].secs));
+      next.font = Font.systemFont(12);
+      next.textColor = MUTED;
     }
   }
 
   // 보조 설명은 역명 아래로 들여쓴다.
   const sub = container.addStack();
   sub.addSpacer(BADGE_W + BADGE_GAP);
+
   const parts = [];
-  if (result.message) {
-    parts.push(result.message);
-  } else {
-    const first = result.arrivals[0];
-    // 절대 시각은 위젯이 아무리 오래 멈춰 있어도 틀리지 않는다. 기준점 역할.
-    if (first.secs !== null) parts.push(clockOf(first.secs));
-    if (first.note) parts.push(first.note);
-    const next = result.arrivals[1];
-    if (next && next.secs !== null) parts.push(`다음 ${clockOf(next.secs)}`);
-  }
+  if (result.message) parts.push(result.message);
+  else if (result.arrivals[0].note) parts.push(result.arrivals[0].note);
   if (result.stale) parts.push(result.stale);
 
-  const note = sub.addText(parts.join(" · "));
-  note.font = Font.systemFont(9);
-  note.textColor = result.message || result.stale ? MUTED : DIM;
-  note.lineLimit = 1;
+  if (parts.length) {
+    const note = sub.addText(parts.join(" · "));
+    note.font = Font.systemFont(9);
+    note.textColor = result.message || result.stale ? MUTED : DIM;
+    note.lineLimit = 1;
+  }
+
+  if (COUNTDOWN_STYLE !== "off" && timed.length && timed[0].secs > 0) {
+    if (parts.length) sub.addSpacer(5);
+    const live = sub.addDate(arrivalDate(timed[0].secs));
+    if (COUNTDOWN_STYLE === "timer") live.applyTimerStyle();
+    else live.applyRelativeStyle();
+    live.font = Font.systemFont(9);
+    live.textColor = DIM;
+  }
+
   sub.addSpacer();
 }
 
@@ -521,6 +527,14 @@ function buildWidget(sections, currentMode, now) {
   const stamp = header.addText(`${fmt.string(now)} 기준`);
   stamp.font = Font.systemFont(10);
   stamp.textColor = MUTED;
+
+  // 여기서는 값이 커지는 게 맞다. 마지막 갱신 이후 흐른 시간이라, 위젯이
+  // 얼마나 묵었는지 그대로 드러난다.
+  header.addSpacer(4);
+  const age = header.addDate(now);
+  age.applyRelativeStyle();
+  age.font = Font.systemFont(10);
+  age.textColor = DIM;
 
   widget.addSpacer(9);
   sections.forEach(({ mode, results }, idx) => {
