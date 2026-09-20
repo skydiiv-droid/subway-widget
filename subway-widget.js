@@ -22,6 +22,12 @@ const AUTO_COMMUTE_UNTIL = 13; // 13시 이전 = 출근
 // 각 구간마다 몇 대까지 보여줄지
 const TRAINS_PER_LEG = 2;
 
+// 남은 시간 표시 방식
+//   relative  iOS가 살아 움직이게 그린다. "5분 후" / 지나면 "5분 전" (권장)
+//   timer     초 단위 카운트다운. 정확하지만 지나가면 위로 세기 시작한다
+//   static    스크립트가 그릴 때의 값으로 고정. 갱신 전까지 움직이지 않는다
+const COUNTDOWN_STYLE = "relative";
+
 // true 로 두고 Scriptable 앱에서 직접 실행하면 원본 응답을 클립보드에 복사한다.
 const DIAG = false;
 
@@ -428,16 +434,21 @@ function drawLeg(container, result) {
     dash.textColor = DIM;
   } else {
     const first = result.arrivals[0];
-    // 한 시간 안쪽이면 살아 움직이는 카운트다운으로, 그 밖이면 그냥 숫자로 둔다.
-    if (first.secs !== null && first.secs > 0 && first.secs < 3600) {
-      const timer = row.addDate(arrivalDate(first.secs));
-      timer.applyTimerStyle();
-      timer.rightAlignText();
-      timer.font = Font.boldSystemFont(18);
-      timer.textColor = FG;
+    const live = COUNTDOWN_STYLE !== "static" &&
+      first.secs !== null && first.secs > 0 && first.secs < 3600;
+
+    if (live) {
+      const date = row.addDate(arrivalDate(first.secs));
+      // relative는 지나간 열차를 "N분 전"으로 적어 방향이 드러난다.
+      // timer는 초까지 보여주지만 지나가면 위로 세므로 읽는 사람이 구분할 수 없다.
+      if (COUNTDOWN_STYLE === "timer") date.applyTimerStyle();
+      else date.applyRelativeStyle();
+      date.rightAlignText();
+      date.font = Font.boldSystemFont(17);
+      date.textColor = FG;
     } else {
       const primary = row.addText(formatRemaining(first.secs));
-      primary.font = Font.boldSystemFont(18);
+      primary.font = Font.boldSystemFont(17);
       primary.textColor = FG;
     }
   }
@@ -449,7 +460,10 @@ function drawLeg(container, result) {
   if (result.message) {
     parts.push(result.message);
   } else {
-    if (result.arrivals[0].note) parts.push(result.arrivals[0].note);
+    const first = result.arrivals[0];
+    // 절대 시각은 위젯이 아무리 오래 멈춰 있어도 틀리지 않는다. 기준점 역할.
+    if (first.secs !== null) parts.push(clockOf(first.secs));
+    if (first.note) parts.push(first.note);
     const next = result.arrivals[1];
     if (next && next.secs !== null) parts.push(`다음 ${clockOf(next.secs)}`);
   }
