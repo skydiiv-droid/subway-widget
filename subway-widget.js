@@ -40,6 +40,11 @@ const LINES = {
 //   arex      station(표시용), code(AREX 역코드), dir("up"=서울역방면 / "down"=인천공항방면)
 //   timetable station(표시용), table(시간표 키), dest(종착역)
 
+const ROUTE_PATHS = {
+  출근: "발산 → 완정",
+  퇴근: "완정 → 발산",
+};
+
 const ROUTES = {
   출근: [
     { line: "line5", station: "발산", via: "마곡 방면",
@@ -140,7 +145,7 @@ const diagDump = [];
 
 async function getJSON(url) {
   const req = new Request(url);
-  req.timeoutInterval = 8;
+  req.timeoutInterval = 15;
   req.headers = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
@@ -267,84 +272,114 @@ async function loadLeg(leg, clock) {
 const BG = new Color("#1C1C1E");
 const FG = new Color("#FFFFFF");
 const MUTED = new Color("#8E8E93");
+const DIM = new Color("#5A5A5E");
+const ACCENT = new Color("#FFD60A");
+
+const BADGE_W = 24;
+const BADGE_GAP = 7;
 
 function drawBadge(stack, line) {
   const badge = stack.addStack();
   badge.backgroundColor = new Color(line.color);
-  badge.cornerRadius = 9;
-  badge.size = new Size(26, 18);
+  badge.cornerRadius = 8;
+  badge.size = new Size(BADGE_W, 17);
   badge.centerAlignContent();
   const label = badge.addText(line.badge);
   label.font = Font.boldSystemFont(10);
   label.textColor = FG;
 }
 
-function drawLeg(stack, result) {
-  const line = LINES[result.leg.line];
-
-  const head = stack.addStack();
-  head.centerAlignContent();
-  drawBadge(head, line);
-  head.addSpacer(6);
-
-  const name = head.addText(`${result.leg.station}역`);
-  name.font = Font.boldSystemFont(14);
-  name.textColor = FG;
-  head.addSpacer(5);
-
-  const via = head.addText(result.leg.via);
-  via.font = Font.systemFont(11);
-  via.textColor = MUTED;
-  head.addSpacer();
-
-  if (result.leg.source === "timetable") {
-    const tag = head.addText("시간표");
-    tag.font = Font.systemFont(10);
-    tag.textColor = MUTED;
-  }
-
-  stack.addSpacer(4);
-
-  if (result.message) {
-    const msg = stack.addText(result.message);
-    msg.font = Font.systemFont(11);
-    msg.textColor = MUTED;
-    return;
-  }
-
-  const row = stack.addStack();
-  result.arrivals.forEach((arrival, idx) => {
-    if (idx > 0) row.addSpacer(10);
-    const cell = row.addStack();
-    cell.layoutVertically();
-
-    const top = cell.addStack();
-    top.centerAlignContent();
-    const dest = top.addText(arrival.dest);
-    dest.font = Font.systemFont(11);
-    dest.textColor = MUTED;
-    top.addSpacer(6);
-    const remain = top.addText(formatRemaining(arrival.secs));
-    remain.font = Font.boldSystemFont(15);
-    remain.textColor = FG;
-
-    if (arrival.note) {
-      const note = cell.addText(arrival.note);
-      note.font = Font.systemFont(9);
-      note.textColor = MUTED;
-    }
-  });
-  row.addSpacer();
+function drawDivider(container) {
+  const rule = container.addStack();
+  rule.size = new Size(0, 1);
+  rule.backgroundColor = DIM;
+  rule.addSpacer();
 }
 
-function buildWidget(mode, results, now) {
+function drawLeg(container, result) {
+  const row = container.addStack();
+  row.centerAlignContent();
+
+  drawBadge(row, LINES[result.leg.line]);
+  row.addSpacer(BADGE_GAP);
+
+  const name = row.addText(`${result.leg.station}역`);
+  name.font = Font.boldSystemFont(14);
+  name.textColor = FG;
+  name.lineLimit = 1;
+
+  row.addSpacer(5);
+  const via = row.addText(result.leg.via);
+  via.font = Font.systemFont(11);
+  via.textColor = MUTED;
+  via.lineLimit = 1;
+
+  row.addSpacer();
+
+  if (result.message) {
+    const dash = row.addText("—");
+    dash.font = Font.boldSystemFont(17);
+    dash.textColor = DIM;
+  } else {
+    const [first, ...rest] = result.arrivals;
+    const primary = row.addText(formatRemaining(first.secs));
+    primary.font = Font.boldSystemFont(17);
+    primary.textColor = FG;
+    rest.forEach((arrival) => {
+      row.addSpacer(7);
+      const next = row.addText(formatRemaining(arrival.secs));
+      next.font = Font.systemFont(12);
+      next.textColor = MUTED;
+    });
+  }
+
+  // 보조 설명은 역명 아래로 들여쓴다.
+  const sub = container.addStack();
+  sub.addSpacer(BADGE_W + BADGE_GAP);
+  const note = sub.addText(
+    result.message || result.arrivals[0].note || ""
+  );
+  note.font = Font.systemFont(9);
+  note.textColor = result.message ? MUTED : DIM;
+  note.lineLimit = 1;
+  sub.addSpacer();
+}
+
+function drawSection(widget, mode, results, isNow) {
+  const header = widget.addStack();
+  header.centerAlignContent();
+
+  const dot = header.addStack();
+  dot.size = new Size(5, 5);
+  dot.cornerRadius = 2.5;
+  dot.backgroundColor = isNow ? ACCENT : DIM;
+  header.addSpacer(6);
+
+  const title = header.addText(mode);
+  title.font = Font.boldSystemFont(12);
+  title.textColor = isNow ? FG : MUTED;
+
+  header.addSpacer(6);
+  const path = header.addText(ROUTE_PATHS[mode]);
+  path.font = Font.systemFont(10);
+  path.textColor = DIM;
+  header.addSpacer();
+
+  widget.addSpacer(7);
+  results.forEach((result, idx) => {
+    if (idx > 0) widget.addSpacer(7);
+    drawLeg(widget, result);
+  });
+}
+
+function buildWidget(sections, currentMode, now) {
   const widget = new ListWidget();
   widget.backgroundColor = BG;
-  widget.setPadding(12, 14, 12, 14);
+  widget.setPadding(13, 14, 13, 14);
 
   const header = widget.addStack();
   header.centerAlignContent();
-  const title = header.addText(mode);
+  const title = header.addText("출퇴근");
   title.font = Font.boldSystemFont(13);
   title.textColor = FG;
   header.addSpacer();
@@ -356,10 +391,14 @@ function buildWidget(mode, results, now) {
   stamp.font = Font.systemFont(10);
   stamp.textColor = MUTED;
 
-  widget.addSpacer(8);
-  results.forEach((result, idx) => {
-    if (idx > 0) widget.addSpacer(9);
-    drawLeg(widget, result);
+  widget.addSpacer(9);
+  sections.forEach(({ mode, results }, idx) => {
+    if (idx > 0) {
+      widget.addSpacer(10);
+      drawDivider(widget);
+      widget.addSpacer(10);
+    }
+    drawSection(widget, mode, results, mode === currentMode);
   });
   widget.addSpacer();
 
@@ -372,11 +411,22 @@ function buildWidget(mode, results, now) {
 const now = new Date();
 const clock = serviceClock(now);
 
-const param = (args.widgetParameter || "").trim();
-const mode = ROUTES[param] ? param : (now.getHours() < AUTO_COMMUTE_UNTIL ? "출근" : "퇴근");
+// 시각으로 지금 어느 쪽인지 짐작해 강조만 한다. 순서는 항상 출근 → 퇴근으로 고정이다.
+const currentMode = now.getHours() < AUTO_COMMUTE_UNTIL ? "출근" : "퇴근";
 
-const results = await Promise.all(ROUTES[mode].map((leg) => loadLeg(leg, clock)));
-const widget = buildWidget(mode, results, now);
+// 중간 크기 위젯에는 여섯 구간이 다 들어가지 않으니 지금 쓰는 쪽만 보여준다.
+const param = (args.widgetParameter || "").trim();
+let modes = Object.keys(ROUTES);
+if (ROUTES[param]) modes = [param];
+else if (config.runsInWidget && config.widgetFamily === "medium") modes = [currentMode];
+
+const sections = [];
+for (const mode of modes) {
+  const results = await Promise.all(ROUTES[mode].map((leg) => loadLeg(leg, clock)));
+  sections.push({ mode, results });
+}
+
+const widget = buildWidget(sections, currentMode, now);
 
 if (config.runsInWidget) {
   Script.setWidget(widget);
@@ -389,6 +439,6 @@ if (config.runsInWidget) {
     alert.addAction("확인");
     await alert.present();
   }
-  await widget.presentMedium();
+  await widget.presentLarge();
 }
 Script.complete();
